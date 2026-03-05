@@ -97,6 +97,30 @@ get_next_id() {
     echo $((current + 1))
 }
 
+# Generate branch name from title and identifier
+generate_branch_name() {
+    local identifier="$1"
+    local title="$2"
+
+    # Convert identifier to lowercase
+    local id_lower=$(echo "$identifier" | tr '[:upper:]' '[:lower:]')
+
+    # Slugify title: lowercase, remove non-alphanumeric except spaces/hyphens, collapse spaces to hyphens, collapse consecutive hyphens
+    local slug=$(echo "$title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9 -]//g' | sed 's/  */ /g' | sed 's/ /-/g' | sed 's/-\+/-/g' | sed 's/^-\|-$//g')
+
+    # Combine identifier and slug
+    local branch_name="$id_lower-$slug"
+
+    # Truncate to 64 characters
+    if [[ ${#branch_name} -gt 64 ]]; then
+        branch_name="${branch_name:0:64}"
+        # Remove trailing hyphen if truncation created one
+        branch_name="${branch_name%%-}"
+    fi
+
+    echo "$branch_name"
+}
+
 # Generate UUID
 generate_uuid() {
     if [[ -f /proc/sys/kernel/random/uuid ]]; then
@@ -223,6 +247,9 @@ read_ticket_json() {
         description=$(cat "$desc_file")
     fi
 
+    # Generate branch name
+    local branch_name=$(generate_branch_name "$identifier" "$title")
+
     # Build documents array
     local documents="[]"
     local docs_dir="$KOTA_HOME/tickets/$identifier/documents"
@@ -245,11 +272,13 @@ read_ticket_json() {
         --arg id "$identifier" \
         --arg t "$title" \
         --arg d "$description" \
+        --arg bn "$branch_name" \
         --argjson docs "$documents" \
         '{
             identifier: $id,
             title: $t,
             description: $d,
+            branchName: $bn,
             documents: $docs
         }'
 }
