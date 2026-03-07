@@ -261,7 +261,7 @@ read_ticket_json() {
             if [[ -f "$doc_dir/title.txt" ]]; then
                 doc_title=$(cat "$doc_dir/title.txt")
             fi
-            docs_json+=("$(jq -n -c --arg did "$doc_id" --arg dt "$doc_title" '{document_id: $did, title: $dt}')")
+            docs_json+=("$(jq -n -c --arg did "$doc_id" --arg dt "$doc_title" '{id: $did, title: $dt}')")
         done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
         if [[ ${#docs_json[@]} -gt 0 ]]; then
             documents=$(printf '%s\n' "${docs_json[@]}" | jq -s '.')
@@ -311,7 +311,7 @@ read_document_json() {
         --arg t "$title" \
         --arg c "$content" \
         '{
-            document_id: $did,
+            id: $did,
             ticket_identifier: $tid,
             title: $t,
             content: $c
@@ -942,7 +942,7 @@ cmd_documents_list() {
                     --arg did "$document_id" \
                     --arg tid "$ticket_id" \
                     --arg t "$title" \
-                    '{document_id: $did, ticket_identifier: $tid, title: $t}')")
+                    '{id: $did, ticket_identifier: $tid, title: $t}')")
             done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
         fi
     else
@@ -962,7 +962,7 @@ cmd_documents_list() {
                         --arg did "$document_id" \
                         --arg tid "$identifier" \
                         --arg t "$title" \
-                        '{document_id: $did, ticket_identifier: $tid, title: $t}')")
+                        '{id: $did, ticket_identifier: $tid, title: $t}')")
                 done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
             fi
         done < <(find "$KOTA_HOME/tickets" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
