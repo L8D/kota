@@ -261,7 +261,12 @@ read_ticket_json() {
             if [[ -f "$doc_dir/title.txt" ]]; then
                 doc_title=$(cat "$doc_dir/title.txt")
             fi
-            docs_json+=("$(jq -n -c --arg did "$doc_id" --arg dt "$doc_title" '{id: $did, title: $dt}')")
+            local doc_uuid=$(basename "$doc_dir")
+            local doc_created_at
+            doc_created_at=$(get_document_created_at "$identifier" "$doc_uuid")
+            local doc_updated_at
+            doc_updated_at=$(get_document_updated_at "$identifier" "$doc_uuid")
+            docs_json+=("$(jq -n -c --arg did "$doc_id" --arg dt "$doc_title" --arg ca "$doc_created_at" --arg ua "$doc_updated_at" '{id: $did, title: $dt, createdAt: $ca, updatedAt: $ua}')")
         done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
         if [[ ${#docs_json[@]} -gt 0 ]]; then
             documents=$(printf '%s\n' "${docs_json[@]}" | jq -s '.')
@@ -281,6 +286,20 @@ read_ticket_json() {
             branchName: $bn,
             documents: $docs
         }'
+}
+
+# Get the createdAt timestamp (earliest commit) for a document
+get_document_created_at() {
+    local ticket_id="$1"
+    local uuid="$2"
+    git -C "$KOTA_HOME" log --diff-filter=A --format='%aI' -- "tickets/$ticket_id/documents/$uuid" | tail -1
+}
+
+# Get the updatedAt timestamp (most recent commit) for a document
+get_document_updated_at() {
+    local ticket_id="$1"
+    local uuid="$2"
+    git -C "$KOTA_HOME" log -1 --format='%aI' -- "tickets/$ticket_id/documents/$uuid"
 }
 
 # Read document from JSON file
@@ -305,16 +324,25 @@ read_document_json() {
         content=$(cat "$doc_dir/content.md")
     fi
 
+    local created_at
+    created_at=$(get_document_created_at "$ticket_id" "$uuid")
+    local updated_at
+    updated_at=$(get_document_updated_at "$ticket_id" "$uuid")
+
     jq -n -c \
         --arg did "$document_id" \
         --arg tid "$ticket_id" \
         --arg t "$title" \
         --arg c "$content" \
+        --arg ca "$created_at" \
+        --arg ua "$updated_at" \
         '{
             id: $did,
             ticket_identifier: $tid,
             title: $t,
-            content: $c
+            content: $c,
+            createdAt: $ca,
+            updatedAt: $ua
         }'
 }
 
@@ -938,11 +966,17 @@ cmd_documents_list() {
                 if [[ -f "$doc_dir/title.txt" ]]; then
                     title=$(cat "$doc_dir/title.txt")
                 fi
+                local created_at
+                created_at=$(get_document_created_at "$ticket_id" "$uuid")
+                local updated_at
+                updated_at=$(get_document_updated_at "$ticket_id" "$uuid")
                 documents_json+=("$(jq -n -c \
                     --arg did "$document_id" \
                     --arg tid "$ticket_id" \
                     --arg t "$title" \
-                    '{id: $did, ticket_identifier: $tid, title: $t}')")
+                    --arg ca "$created_at" \
+                    --arg ua "$updated_at" \
+                    '{id: $did, ticket_identifier: $tid, title: $t, createdAt: $ca, updatedAt: $ua}')")
             done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
         fi
     else
@@ -958,11 +992,17 @@ cmd_documents_list() {
                     if [[ -f "$doc_dir/title.txt" ]]; then
                         title=$(cat "$doc_dir/title.txt")
                     fi
+                    local created_at
+                    created_at=$(get_document_created_at "$identifier" "$uuid")
+                    local updated_at
+                    updated_at=$(get_document_updated_at "$identifier" "$uuid")
                     documents_json+=("$(jq -n -c \
                         --arg did "$document_id" \
                         --arg tid "$identifier" \
                         --arg t "$title" \
-                        '{id: $did, ticket_identifier: $tid, title: $t}')")
+                        --arg ca "$created_at" \
+                        --arg ua "$updated_at" \
+                        '{id: $did, ticket_identifier: $tid, title: $t, createdAt: $ca, updatedAt: $ua}')")
                 done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
             fi
         done < <(find "$KOTA_HOME/tickets" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
