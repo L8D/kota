@@ -313,11 +313,221 @@ cmd_tickets_list() {
     echo "$result"
 }
 
-# Documents (stub for now — will be implemented in a later subtask)
+# Documents
 
-cmd_documents() {
-    echo '{"error":"documents commands not yet implemented in linear mode"}' >&2
-    exit 1
+cmd_documents_create() {
+    local ticket_id=""
+    local title=""
+    local content=""
+    local stdin_used=0
+
+    ticket_id=$(parse_arg "ticket" "$@") || true
+    if [[ -z "$ticket_id" ]]; then
+        ticket_id=$(parse_arg "ticket-id" "$@") || true
+    fi
+    title=$(parse_arg "title" "$@") || true
+    content=$(parse_arg "content" "$@") || true
+
+    # Handle stdin
+    if [[ -n "$title" ]] && stdin_was_used "$title"; then
+        ((stdin_used++))
+        title=$(cat)
+    fi
+    if [[ -n "$content" ]] && stdin_was_used "$content"; then
+        ((stdin_used++))
+        content=$(cat)
+    fi
+
+    if [[ $stdin_used -gt 1 ]]; then
+        echo '{"error":"Only one parameter can use stdin at a time."}' >&2
+        exit 1
+    fi
+
+    if [[ -z "$ticket_id" ]]; then
+        echo '{"error":"Ticket identifier required. Use --ticket <id>."}' >&2
+        exit 1
+    fi
+
+    if [[ -z "$title" ]]; then
+        echo '{"error":"Title is required."}' >&2
+        exit 1
+    fi
+
+    local args=(linearis documents create --title "$title" --attach-to "$ticket_id")
+    if [[ -n "$content" ]]; then
+        args+=(--content "$content")
+    fi
+
+    local result
+    result=$("${args[@]}")
+
+    echo "$result" | jq --arg tid "$ticket_id" '{
+        id: ($tid + "/" + .slugId),
+        ticket_identifier: $tid,
+        title: .title,
+        content: (.content // ""),
+        createdAt: .createdAt,
+        updatedAt: .updatedAt
+    }'
+}
+
+cmd_documents_read() {
+    local document_id=""
+
+    document_id=$(parse_arg "document" "$@") || true
+    if [[ -z "$document_id" ]]; then
+        document_id=$(parse_arg "document-id" "$@") || true
+    fi
+    if [[ -z "$document_id" ]]; then
+        document_id=$(parse_positional "$@") || true
+    fi
+
+    if [[ -z "$document_id" ]]; then
+        echo '{"error":"Document ID required."}' >&2
+        exit 1
+    fi
+
+    local ticket_id="${document_id%%/*}"
+    local slug="${document_id#*/}"
+
+    linearis documents read "$slug" | jq --arg tid "$ticket_id" --arg did "$document_id" '{
+        id: $did,
+        ticket_identifier: $tid,
+        title: .title,
+        content: (.content // ""),
+        createdAt: .createdAt,
+        updatedAt: .updatedAt
+    }'
+}
+
+cmd_documents_update() {
+    local document_id=""
+    local title=""
+    local content=""
+    local stdin_used=0
+
+    document_id=$(parse_arg "document" "$@") || true
+    if [[ -z "$document_id" ]]; then
+        document_id=$(parse_arg "document-id" "$@") || true
+    fi
+    if [[ -z "$document_id" ]]; then
+        document_id=$(parse_positional "$@") || true
+    fi
+    title=$(parse_arg "title" "$@") || true
+    content=$(parse_arg "content" "$@") || true
+
+    # Handle stdin
+    if [[ -n "$title" ]] && stdin_was_used "$title"; then
+        ((stdin_used++))
+        title=$(cat)
+    fi
+    if [[ -n "$content" ]] && stdin_was_used "$content"; then
+        ((stdin_used++))
+        content=$(cat)
+    fi
+
+    if [[ $stdin_used -gt 1 ]]; then
+        echo '{"error":"Only one parameter can use stdin at a time."}' >&2
+        exit 1
+    fi
+
+    if [[ -z "$document_id" ]]; then
+        echo '{"error":"Document ID required."}' >&2
+        exit 1
+    fi
+
+    local ticket_id="${document_id%%/*}"
+    local slug="${document_id#*/}"
+
+    local args=(linearis documents update "$slug")
+    if [[ -n "$title" ]]; then
+        args+=(-t "$title")
+    fi
+    if [[ -n "$content" ]]; then
+        args+=(-c "$content")
+    fi
+
+    local result
+    result=$("${args[@]}")
+
+    echo "$result" | jq --arg tid "$ticket_id" '{
+        id: ($tid + "/" + .slugId),
+        ticket_identifier: $tid,
+        title: .title,
+        content: (.content // ""),
+        createdAt: .createdAt,
+        updatedAt: .updatedAt
+    }'
+}
+
+cmd_documents_delete() {
+    local document_id=""
+    local force=false
+
+    document_id=$(parse_arg "document" "$@") || true
+    if [[ -z "$document_id" ]]; then
+        document_id=$(parse_arg "document-id" "$@") || true
+    fi
+    if [[ -z "$document_id" ]]; then
+        document_id=$(parse_positional "$@") || true
+    fi
+    if has_flag "--force" "$@"; then
+        force=true
+    fi
+
+    if [[ -z "$document_id" ]]; then
+        echo '{"error":"Document ID required."}' >&2
+        exit 1
+    fi
+
+    local ticket_id="${document_id%%/*}"
+    local slug="${document_id#*/}"
+
+    if [[ "$force" != "true" ]]; then
+        local doc_json
+        doc_json=$(linearis documents read "$slug")
+        local title
+        title=$(echo "$doc_json" | jq -r '.title')
+        echo "Document: $document_id"
+        echo "Title: $title"
+        echo ""
+        read -r -p "Are you sure you want to delete this document? [y/N] " confirm
+        if [[ "$confirm" != [yY] ]]; then
+            echo "Aborted." >&2
+            exit 1
+        fi
+    fi
+
+    linearis documents delete "$slug"
+}
+
+cmd_documents_list() {
+    local ticket_id=""
+    local limit=""
+
+    ticket_id=$(parse_arg "ticket" "$@") || true
+    if [[ -z "$ticket_id" ]]; then
+        ticket_id=$(parse_arg "ticket-id" "$@") || true
+    fi
+    limit=$(parse_arg "limit" "$@") || true
+
+    if [[ -n "$ticket_id" ]]; then
+        linearis documents list --issue "$ticket_id" --limit "${limit:-50}" | jq --arg tid "$ticket_id" '[.[] | {
+            id: ($tid + "/" + .slugId),
+            ticket_identifier: $tid,
+            title: .title,
+            createdAt: .createdAt,
+            updatedAt: .updatedAt
+        }]'
+    else
+        linearis documents list --limit "${limit:-50}" | jq '[.[] | {
+            id: ("/" + .slugId),
+            ticket_identifier: "",
+            title: .title,
+            createdAt: .createdAt,
+            updatedAt: .updatedAt
+        }]'
+    fi
 }
 
 # Main entry point
@@ -335,7 +545,18 @@ case "${1:-}" in
             *)      echo "Error: Unknown subcommand '$1'. Use 'kota usage' for help." >&2; exit 1 ;;
         esac
         ;;
-    documents) shift; cmd_documents "$@" ;;
+    documents)
+        shift
+        case "${1:-}" in
+            create) shift; cmd_documents_create "$@" ;;
+            read)   shift; cmd_documents_read "$@" ;;
+            update) shift; cmd_documents_update "$@" ;;
+            delete) shift; cmd_documents_delete "$@" ;;
+            list)   shift; cmd_documents_list "$@" ;;
+            "")     echo "Error: Subcommand required. Use 'kota usage' for help." >&2; exit 1 ;;
+            *)      echo "Error: Unknown subcommand '$1'. Use 'kota usage' for help." >&2; exit 1 ;;
+        esac
+        ;;
     init)      echo "Linear mode: no initialization needed." >&2 ;;
     usage|--help|-h) print_usage ;;
     "")        print_usage; exit 0 ;;
