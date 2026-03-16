@@ -1,0 +1,1108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kota - A CLI tool for managing tickets and documents, backed by a local git repository
+
+print_usage() {
+    cat << 'EOF'
+kota - A CLI tool for managing tickets and documents, backed by a local git repository.
+
+COMMANDS:
+  kota usage, kota --help     Show this help message
+  kota init                   Initialize the kota data directory and git repo
+
+TICKETS:
+  kota tickets create         Create a new ticket
+  kota tickets read <id>      Read a ticket as JSON
+  kota tickets update <id>    Update an existing ticket
+  kota tickets delete <id>    Delete a ticket
+  kota tickets list           List all tickets
+
+DOCUMENTS:
+  kota documents create       Create a new document attached to a ticket
+  kota documents read <id>    Read a document as JSON
+  kota documents update <id>  Update an existing document
+  kota documents delete <id>  Delete a document
+  kota documents list         List documents (optionally scoped to a ticket)
+
+ENVIRONMENT VARIABLES:
+  KOTA_HOME                   Path to the kota data directory (git repo). Required.
+  KOTA_DEFAULT_PREFIX         Default ticket prefix (e.g. DEV) for ticket creation.
+
+EXAMPLES:
+  kota init
+  kota tickets create --title "Fix login bug" --description "Users cannot log in"
+  kota tickets create --title "New feature" --prefix FEATURE
+  kota tickets read DEV-123
+  kota tickets update DEV-123 --title "Updated title"
+  kota tickets list
+  kota documents create --ticket DEV-123 --title "Design notes" --content "Notes here"
+  kota documents read DEV-123/cfe75b5c-86e9-46d7-8a38-04a9884b5b97
+  kota documents list --ticket DEV-123
+EOF
+}
+
+# Check if KOTA_HOME is set and is a git repo, auto-initialize if needed
+check_kota_home() {
+    if [[ -z "${KOTA_HOME:-}" ]]; then
+        echo "Error: KOTA_HOME environment variable is not set." >&2
+        echo "Please set KOTA_HOME to the path of your kota data directory." >&2
+        exit 1
+    fi
+
+    if [[ ! -d "$KOTA_HOME" ]]; then
+        init_kota_repo
+    elif [[ ! -d "$KOTA_HOME/.git" ]]; then
+        init_kota_repo
+    fi
+
+    # Ensure tickets directory exists
+    mkdir -p "$KOTA_HOME/tickets"
+}
+
+# Initialize kota repo if needed (used for auto-initialization)
+init_kota_repo() {
+    if [[ ! -d "$KOTA_HOME" ]]; then
+        mkdir -p "$KOTA_HOME"
+    fi
+    if [[ ! -d "$KOTA_HOME/.git" ]]; then
+        git -C "$KOTA_HOME" init -q
+    fi
+    mkdir -p "$KOTA_HOME/tickets"
+    if [[ ! -f "$KOTA_HOME/tickets/.gitkeep" ]]; then
+        touch "$KOTA_HOME/tickets/.gitkeep"
+    fi
+    # Only commit if there are no commits yet
+    if ! git -C "$KOTA_HOME" rev-parse HEAD >/dev/null 2>&1; then
+        git -C "$KOTA_HOME" add -A
+        git -C "$KOTA_HOME" commit -m "kota: initial setup" -q
+    fi
+}
+
+# Auto-commit after a change
+auto_commit() {
+    local message="$1"
+    git -C "$KOTA_HOME" add -A
+    git -C "$KOTA_HOME" commit -m "$message" -q
+}
+
+# Get next sequence number
+get_next_id() {
+    local seq_file="$KOTA_HOME/sequence"
+    local current=0
+    if [[ -f "$seq_file" ]]; then
+        current=$(cat "$seq_file")
+    fi
+    echo $((current + 1)) > "$seq_file"
+    echo $((current + 1))
+}
+
+# Generate branch name from title and identifier
+generate_branch_name() {
+    local identifier="$1"
+    local title="$2"
+
+    # Convert identifier to lowercase
+    local id_lower=$(echo "$identifier" | tr '[:upper:]' '[:lower:]')
+
+    # Slugify title: lowercase, remove non-alphanumeric except spaces/hyphens, collapse spaces to hyphens, collapse consecutive hyphens
+    local slug=$(echo "$title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9 -]//g' | sed 's/  */ /g' | sed 's/ /-/g' | sed 's/-\+/-/g' | sed 's/^-\|-$//g')
+
+    # Combine identifier and slug
+    local branch_name="$id_lower-$slug"
+
+    # Truncate to 64 characters
+    if [[ ${#branch_name} -gt 64 ]]; then
+        branch_name="${branch_name:0:64}"
+        # Remove trailing hyphen if truncation created one
+        branch_name="${branch_name%%-}"
+    fi
+
+    echo "$branch_name"
+}
+
+# Generate UUID
+generate_uuid() {
+    if [[ -f /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || echo "$(date +%s)-$$-$RANDOM"
+    fi
+}
+
+# Parse ticket identifier from args
+parse_ticket_id() {
+    local result=""
+    shift
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--ticket" || "$arg" == "--ticket-id" ]]; then
+            if [[ $((i + 1)) -lt ${#args[@]} ]]; then
+                result="${args[$((i + 1))]}"
+                return
+            fi
+        elif [[ "$arg" == --ticket=* ]]; then
+            result="${arg#--ticket=}"
+            return
+        elif [[ "$arg" == --ticket-id=* ]]; then
+            result="${arg#--ticket-id=}"
+            return
+        fi
+    done
+    # Return first positional if not found
+    if [[ -z "$result" && ${#args[@]} -gt 0 ]]; then
+        result="${args[0]}"
+    fi
+    echo "$result"
+}
+
+# Parse document ID from args
+parse_document_id() {
+    local result=""
+    shift
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--document" || "$arg" == "--document-id" ]]; then
+            if [[ $((i + 1)) -lt ${#args[@]} ]]; then
+                result="${args[$((i + 1))]}"
+                return
+            fi
+        elif [[ "$arg" == --document=* ]]; then
+            result="${arg#--document=}"
+            return
+        elif [[ "$arg" == --document-id=* ]]; then
+            result="${arg#--document-id=}"
+            return
+        fi
+    done
+    # Return first positional if not found
+    if [[ -z "$result" && ${#args[@]} -gt 0 ]]; then
+        result="${args[0]}"
+    fi
+    echo "$result"
+}
+
+# Parse single arg value (for --key=value or --key value)
+parse_arg() {
+    local key="$1"
+    shift
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--${key}="* ]]; then
+            echo "${arg#--${key}=}"
+            return
+        elif [[ "$arg" == "--${key}" ]]; then
+            if [[ $((i + 1)) -lt ${#args[@]} ]]; then
+                echo "${args[$((i + 1))]}"
+                return
+            fi
+        fi
+    done
+}
+
+# Parse boolean flag
+has_flag() {
+    local flag="$1"
+    shift
+    local args=("$@")
+    for arg in "${args[@]}"; do
+        if [[ "$arg" == "$flag" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Check if stdin was used
+stdin_was_used() {
+    [[ "$1" == "-" ]]
+}
+
+# Read value from stdin if "-", otherwise return the value
+read_value() {
+    local value="$1"
+    if [[ "$value" == "-" ]]; then
+        cat
+    else
+        echo "$value"
+    fi
+}
+
+# Read ticket from JSON file
+read_ticket_json() {
+    local identifier="$1"
+    local title_file="$KOTA_HOME/tickets/$identifier/title.txt"
+    local desc_file="$KOTA_HOME/tickets/$identifier/description.md"
+
+    local title=""
+    local description=""
+
+    if [[ -f "$title_file" ]]; then
+        title=$(cat "$title_file")
+    fi
+    if [[ -f "$desc_file" ]]; then
+        description=$(cat "$desc_file")
+    fi
+
+    # Generate branch name
+    local branch_name=$(generate_branch_name "$identifier" "$title")
+
+    # Build documents array
+    local documents="[]"
+    local docs_dir="$KOTA_HOME/tickets/$identifier/documents"
+    if [[ -d "$docs_dir" ]]; then
+        local docs_json=()
+        while IFS= read -r -d '' doc_dir; do
+            local doc_id="$identifier/$(basename "$doc_dir")"
+            local doc_title=""
+            if [[ -f "$doc_dir/title.txt" ]]; then
+                doc_title=$(cat "$doc_dir/title.txt")
+            fi
+            local doc_uuid=$(basename "$doc_dir")
+            local doc_created_at
+            doc_created_at=$(get_document_created_at "$identifier" "$doc_uuid")
+            local doc_updated_at
+            doc_updated_at=$(get_document_updated_at "$identifier" "$doc_uuid")
+            docs_json+=("$(jq -n -c --arg did "$doc_id" --arg dt "$doc_title" --arg ca "$doc_created_at" --arg ua "$doc_updated_at" '{id: $did, title: $dt, createdAt: $ca, updatedAt: $ua}')")
+        done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+        if [[ ${#docs_json[@]} -gt 0 ]]; then
+            documents=$(printf '%s\n' "${docs_json[@]}" | jq -s '.')
+        fi
+    fi
+
+    jq -n -c \
+        --arg id "$identifier" \
+        --arg t "$title" \
+        --arg d "$description" \
+        --arg bn "$branch_name" \
+        --argjson docs "$documents" \
+        '{
+            identifier: $id,
+            title: $t,
+            description: $d,
+            branchName: $bn,
+            documents: $docs
+        }'
+}
+
+# Get the createdAt timestamp (earliest commit) for a document
+get_document_created_at() {
+    local ticket_id="$1"
+    local uuid="$2"
+    git -C "$KOTA_HOME" log --diff-filter=A --format='%aI' -- "tickets/$ticket_id/documents/$uuid" | tail -1
+}
+
+# Get the updatedAt timestamp (most recent commit) for a document
+get_document_updated_at() {
+    local ticket_id="$1"
+    local uuid="$2"
+    git -C "$KOTA_HOME" log -1 --format='%aI' -- "tickets/$ticket_id/documents/$uuid"
+}
+
+# Read document from JSON file
+read_document_json() {
+    local document_id="$1"
+    local ticket_id="${document_id%%/*}"
+    local uuid="${document_id#*/}"
+    local doc_dir="$KOTA_HOME/tickets/$ticket_id/documents/$uuid"
+
+    if [[ ! -d "$doc_dir" ]]; then
+        echo "Error: Document '$document_id' not found." >&2
+        exit 1
+    fi
+
+    local title=""
+    local content=""
+
+    if [[ -f "$doc_dir/title.txt" ]]; then
+        title=$(cat "$doc_dir/title.txt")
+    fi
+    if [[ -f "$doc_dir/content.md" ]]; then
+        content=$(cat "$doc_dir/content.md")
+    fi
+
+    local created_at
+    created_at=$(get_document_created_at "$ticket_id" "$uuid")
+    local updated_at
+    updated_at=$(get_document_updated_at "$ticket_id" "$uuid")
+
+    jq -n -c \
+        --arg did "$document_id" \
+        --arg tid "$ticket_id" \
+        --arg t "$title" \
+        --arg c "$content" \
+        --arg ca "$created_at" \
+        --arg ua "$updated_at" \
+        '{
+            id: $did,
+            ticket_identifier: $tid,
+            title: $t,
+            content: $c,
+            createdAt: $ca,
+            updatedAt: $ua
+        }'
+}
+
+# Print ticket summary for deletion prompt
+print_ticket_summary() {
+    local identifier="$1"
+    local title_file="$KOTA_HOME/tickets/$identifier/title.txt"
+    local docs_dir="$KOTA_HOME/tickets/$identifier/documents"
+
+    local title=""
+    if [[ -f "$title_file" ]]; then
+        title=$(cat "$title_file")
+    fi
+
+    local doc_count=0
+    if [[ -d "$docs_dir" ]]; then
+        doc_count=$(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    fi
+
+    echo "Ticket: $identifier"
+    echo "Title: $title"
+    echo "Documents: $doc_count"
+}
+
+# Print document summary for deletion prompt
+print_document_summary() {
+    local document_id="$1"
+    local ticket_id="${document_id%%/*}"
+    local uuid="${document_id#*/}"
+    local doc_dir="$KOTA_HOME/tickets/$ticket_id/documents/$uuid"
+
+    local title=""
+    if [[ -f "$doc_dir/title.txt" ]]; then
+        title=$(cat "$doc_dir/title.txt")
+    fi
+
+    echo "Document: $document_id"
+    echo "Title: $title"
+}
+
+# Commands
+
+cmd_init() {
+    # Check if already initialized (directory exists and has .git with commits)
+    if [[ -d "$KOTA_HOME/.git" ]] && git -C "$KOTA_HOME" rev-parse HEAD >/dev/null 2>&1; then
+        echo "kota directory '$KOTA_HOME' is already initialized as a git repository."
+        return 0
+    fi
+
+    # Initialize if needed (check_kota_home will call init_kota_repo if needed)
+    check_kota_home
+
+    # Check if the repo was just initialized (no prior commits)
+    if ! git -C "$KOTA_HOME" rev-parse HEAD >/dev/null 2>&1; then
+        git -C "$KOTA_HOME" add -A
+        git -C "$KOTA_HOME" commit -m "kota: initial setup" -q
+        echo "Created initial commit."
+    else
+        # Repo was already initialized by check_kota_home
+        echo "kota directory '$KOTA_HOME' is now initialized."
+    fi
+}
+
+cmd_tickets_create() {
+    local title=""
+    local description=""
+    local prefix=""
+    local ticket_id=""
+    local stdin_used=0
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--title="* ]]; then
+            title="${arg#--title=}"
+        elif [[ "$arg" == "--title" && $((i + 1)) -lt ${#args[@]} ]]; then
+            title="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--description="* ]]; then
+            description="${arg#--description=}"
+        elif [[ "$arg" == "--description" && $((i + 1)) -lt ${#args[@]} ]]; then
+            description="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--prefix="* ]]; then
+            prefix="${arg#--prefix=}"
+        elif [[ "$arg" == "--prefix" && $((i + 1)) -lt ${#args[@]} ]]; then
+            prefix="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--ticket" || "$arg" == "--ticket-id" ]]; then
+            # These are for tickets read/update/delete, skip
+            :
+        elif [[ "$arg" != --* && -z "$ticket_id" ]]; then
+            ticket_id="$arg"
+        fi
+    done
+
+    # Get title from positional if not set
+    if [[ -z "$title" && -n "$ticket_id" ]]; then
+        title="$ticket_id"
+        ticket_id=""
+    fi
+
+    # Get prefix from env var if not set
+    if [[ -z "$prefix" && -n "${KOTA_DEFAULT_PREFIX:-}" ]]; then
+        prefix="$KOTA_DEFAULT_PREFIX"
+    fi
+
+    if [[ -z "$prefix" ]]; then
+        echo "Error: No prefix specified. Use --prefix or set KOTA_DEFAULT_PREFIX environment variable." >&2
+        exit 1
+    fi
+
+    # Check for stdin usage
+    if stdin_was_used "$title"; then
+        ((stdin_used++))
+        title=$(cat)
+    fi
+    if stdin_was_used "$description"; then
+        ((stdin_used++))
+        description=$(cat)
+    fi
+
+    if [[ $stdin_used -gt 1 ]]; then
+        echo "Error: Only one parameter can use '-' to read from stdin at a time." >&2
+        exit 1
+    fi
+
+    check_kota_home
+
+    local id=$(get_next_id)
+    local identifier="$prefix-$id"
+    local ticket_dir="$KOTA_HOME/tickets/$identifier"
+
+    mkdir -p "$ticket_dir"
+    echo -n "$title" > "$ticket_dir/title.txt"
+    echo -n "$description" > "$ticket_dir/description.md"
+
+    auto_commit "kota: create ticket $identifier \"$title\""
+
+    cmd_tickets_read "$identifier"
+}
+
+cmd_tickets_read() {
+    local identifier=""
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--ticket="* ]]; then
+            identifier="${arg#--ticket=}"
+        elif [[ "$arg" == "--ticket-id="* ]]; then
+            identifier="${arg#--ticket-id=}"
+        elif [[ "$arg" == "--ticket" && $((i + 1)) -lt ${#args[@]} ]]; then
+            identifier="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--ticket-id" && $((i + 1)) -lt ${#args[@]} ]]; then
+            identifier="${args[$((i + 1))]}"
+        elif [[ "$arg" != --* && -z "$identifier" ]]; then
+            identifier="$arg"
+        fi
+    done
+
+    if [[ -z "$identifier" ]]; then
+        echo "Error: Ticket identifier required. Use --ticket or pass as positional argument." >&2
+        exit 1
+    fi
+
+    check_kota_home
+
+    read_ticket_json "$identifier" | jq '.'
+}
+
+cmd_tickets_update() {
+    local identifier=""
+    local title=""
+    local description=""
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--ticket="* ]]; then
+            identifier="${arg#--ticket=}"
+        elif [[ "$arg" == "--ticket-id="* ]]; then
+            identifier="${arg#--ticket-id=}"
+        elif [[ "$arg" == "--ticket" && $((i + 1)) -lt ${#args[@]} ]]; then
+            identifier="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--ticket-id" && $((i + 1)) -lt ${#args[@]} ]]; then
+            identifier="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--title="* ]]; then
+            title="${arg#--title=}"
+        elif [[ "$arg" == "--title" && $((i + 1)) -lt ${#args[@]} ]]; then
+            title="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--description="* ]]; then
+            description="${arg#--description=}"
+        elif [[ "$arg" == "--description" && $((i + 1)) -lt ${#args[@]} ]]; then
+            description="${args[$((i + 1))]}"
+        elif [[ "$arg" != --* && -z "$identifier" ]]; then
+            identifier="$arg"
+        fi
+    done
+
+    if [[ -z "$identifier" ]]; then
+        echo "Error: Ticket identifier required. Use --ticket or pass as positional argument." >&2
+        exit 1
+    fi
+
+    if [[ ! -d "$KOTA_HOME/tickets/$identifier" ]]; then
+        echo "Error: Ticket '$identifier' not found." >&2
+        exit 1
+    fi
+
+    # Read values from stdin if needed
+    if stdin_was_used "$title"; then
+        title=$(cat)
+    fi
+    if stdin_was_used "$description"; then
+        description=$(cat)
+    fi
+
+    # Update files
+    if [[ -n "${title:-}" ]]; then
+        echo -n "$title" > "$KOTA_HOME/tickets/$identifier/title.txt"
+    fi
+
+    if [[ -n "${description:-}" ]]; then
+        echo -n "$description" > "$KOTA_HOME/tickets/$identifier/description.md"
+    fi
+
+    # Build commit message
+    local commit_msg="kota: update ticket $identifier"
+    if [[ -n "${title:-}" ]]; then
+        commit_msg="$commit_msg title"
+    elif [[ -n "${description:-}" ]]; then
+        commit_msg="$commit_msg description"
+    fi
+
+    auto_commit "$commit_msg"
+
+    cmd_tickets_read "$identifier"
+}
+
+cmd_tickets_delete() {
+    local identifier=""
+    local force=false
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--ticket="* ]]; then
+            identifier="${arg#--ticket=}"
+        elif [[ "$arg" == "--ticket-id="* ]]; then
+            identifier="${arg#--ticket-id=}"
+        elif [[ "$arg" == "--ticket" && $((i + 1)) -lt ${#args[@]} ]]; then
+            identifier="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--ticket-id" && $((i + 1)) -lt ${#args[@]} ]]; then
+            identifier="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--force" ]]; then
+            force=true
+        elif [[ "$arg" != --* && -z "$identifier" ]]; then
+            identifier="$arg"
+        fi
+    done
+
+    if [[ -z "$identifier" ]]; then
+        echo "Error: Ticket identifier required. Use --ticket or pass as positional argument." >&2
+        exit 1
+    fi
+
+    if [[ ! -d "$KOTA_HOME/tickets/$identifier" ]]; then
+        echo "Error: Ticket '$identifier' not found." >&2
+        exit 1
+    fi
+
+    if [[ "$force" != "true" ]]; then
+        print_ticket_summary "$identifier"
+        read -r -p "Are you sure you want to delete this ticket? [y/N] " response
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            echo "Deletion cancelled."
+            exit 0
+        fi
+    fi
+
+    rm -rf "$KOTA_HOME/tickets/$identifier"
+    auto_commit "kota: delete ticket $identifier"
+    echo "Deleted ticket $identifier."
+}
+
+cmd_tickets_list() {
+    local prefix=""
+    local limit=""
+    local sort_by="id"
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--prefix="* ]]; then
+            prefix="${arg#--prefix=}"
+        elif [[ "$arg" == "--prefix" && $((i + 1)) -lt ${#args[@]} ]]; then
+            prefix="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--limit="* ]]; then
+            limit="${arg#--limit=}"
+        elif [[ "$arg" == "--limit" && $((i + 1)) -lt ${#args[@]} ]]; then
+            limit="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--sort="* ]]; then
+            sort_by="${arg#--sort=}"
+        elif [[ "$arg" == "--sort" && $((i + 1)) -lt ${#args[@]} ]]; then
+            sort_by="${args[$((i + 1))]}"
+        fi
+    done
+
+    check_kota_home
+
+    local tickets_json=()
+    while IFS= read -r -d '' ticket_dir; do
+        local identifier=$(basename "$ticket_dir")
+        local title=""
+        if [[ -f "$ticket_dir/title.txt" ]]; then
+            title=$(cat "$ticket_dir/title.txt")
+        fi
+
+        local doc_count=0
+        local docs_dir="$ticket_dir/documents"
+        if [[ -d "$docs_dir" ]]; then
+            doc_count=$(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        fi
+
+        # Apply prefix filter
+        if [[ -n "$prefix" && ! "$identifier" =~ ^"$prefix"- ]]; then
+            continue
+        fi
+
+        tickets_json+=("$(jq -n -c \
+            --arg id "$identifier" \
+            --arg t "$title" \
+            --argjson dc "$doc_count" \
+            '{identifier: $id, title: $t, document_count: $dc}')")
+    done < <(find "$KOTA_HOME/tickets" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+    # Sort and output
+    if [[ ${#tickets_json[@]} -eq 0 ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    local result
+    result=$(printf '%s\n' "${tickets_json[@]}" | jq -s '.')
+
+    if [[ "$sort_by" == "title" ]]; then
+        result=$(echo "$result" | jq 'sort_by(.title)')
+    fi
+
+    if [[ -n "$limit" ]]; then
+        result=$(echo "$result" | jq ". | limit($limit; .)")
+    fi
+
+    echo "$result"
+}
+
+cmd_documents_create() {
+    local ticket_id=""
+    local title=""
+    local content=""
+    local stdin_used=0
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--ticket="* ]]; then
+            ticket_id="${arg#--ticket=}"
+        elif [[ "$arg" == "--ticket-id="* ]]; then
+            ticket_id="${arg#--ticket-id=}"
+        elif [[ "$arg" == "--ticket" && $((i + 1)) -lt ${#args[@]} ]]; then
+            ticket_id="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--ticket-id" && $((i + 1)) -lt ${#args[@]} ]]; then
+            ticket_id="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--title="* ]]; then
+            title="${arg#--title=}"
+        elif [[ "$arg" == "--title" && $((i + 1)) -lt ${#args[@]} ]]; then
+            title="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--content="* ]]; then
+            content="${arg#--content=}"
+        elif [[ "$arg" == "--content" && $((i + 1)) -lt ${#args[@]} ]]; then
+            content="${args[$((i + 1))]}"
+        elif [[ "$arg" != --* && -z "$ticket_id" ]]; then
+            ticket_id="$arg"
+        fi
+    done
+
+    if [[ -z "$ticket_id" ]]; then
+        echo "Error: Ticket identifier required. Use --ticket or pass as positional argument." >&2
+        exit 1
+    fi
+
+    if [[ ! -d "$KOTA_HOME/tickets/$ticket_id" ]]; then
+        echo "Error: Ticket '$ticket_id' not found." >&2
+        exit 1
+    fi
+
+    # Check for stdin usage
+    if stdin_was_used "$title"; then
+        ((stdin_used++))
+        title=$(cat)
+    fi
+    if stdin_was_used "$content"; then
+        ((stdin_used++))
+        content=$(cat)
+    fi
+
+    if [[ $stdin_used -gt 1 ]]; then
+        echo "Error: Only one parameter can use '-' to read from stdin at a time." >&2
+        exit 1
+    fi
+
+    check_kota_home
+
+    local uuid=$(generate_uuid)
+    local document_id="$ticket_id/$uuid"
+    local doc_dir="$KOTA_HOME/tickets/$ticket_id/documents/$uuid"
+
+    mkdir -p "$doc_dir"
+    echo -n "$title" > "$doc_dir/title.txt"
+    echo -n "$content" > "$doc_dir/content.md"
+
+    auto_commit "kota: create document $document_id \"$title\""
+
+    cmd_documents_read "$document_id"
+}
+
+cmd_documents_read() {
+    local document_id=""
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--document="* ]]; then
+            document_id="${arg#--document=}"
+        elif [[ "$arg" == "--document-id="* ]]; then
+            document_id="${arg#--document-id=}"
+        elif [[ "$arg" == "--document" && $((i + 1)) -lt ${#args[@]} ]]; then
+            document_id="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--document-id" && $((i + 1)) -lt ${#args[@]} ]]; then
+            document_id="${args[$((i + 1))]}"
+        elif [[ "$arg" != --* && -z "$document_id" ]]; then
+            document_id="$arg"
+        fi
+    done
+
+    if [[ -z "$document_id" ]]; then
+        echo "Error: Document ID required. Use --document or pass as positional argument." >&2
+        exit 1
+    fi
+
+    check_kota_home
+
+    read_document_json "$document_id" | jq '.'
+}
+
+cmd_documents_update() {
+    local document_id=""
+    local title=""
+    local content=""
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--document="* ]]; then
+            document_id="${arg#--document=}"
+        elif [[ "$arg" == "--document-id="* ]]; then
+            document_id="${arg#--document-id=}"
+        elif [[ "$arg" == "--document" && $((i + 1)) -lt ${#args[@]} ]]; then
+            document_id="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--document-id" && $((i + 1)) -lt ${#args[@]} ]]; then
+            document_id="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--title="* ]]; then
+            title="${arg#--title=}"
+        elif [[ "$arg" == "--title" && $((i + 1)) -lt ${#args[@]} ]]; then
+            title="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--content="* ]]; then
+            content="${arg#--content=}"
+        elif [[ "$arg" == "--content" && $((i + 1)) -lt ${#args[@]} ]]; then
+            content="${args[$((i + 1))]}"
+        elif [[ "$arg" != --* && -z "$document_id" ]]; then
+            document_id="$arg"
+        fi
+    done
+
+    if [[ -z "$document_id" ]]; then
+        echo "Error: Document ID required. Use --document or pass as positional argument." >&2
+        exit 1
+    fi
+
+    local ticket_id="${document_id%%/*}"
+    local uuid="${document_id#*/}"
+    local doc_dir="$KOTA_HOME/tickets/$ticket_id/documents/$uuid"
+
+    if [[ ! -d "$doc_dir" ]]; then
+        echo "Error: Document '$document_id' not found." >&2
+        exit 1
+    fi
+
+    # Read values from stdin if needed
+    if stdin_was_used "$title"; then
+        title=$(cat)
+    fi
+    if stdin_was_used "$content"; then
+        content=$(cat)
+    fi
+
+    # Update files
+    if [[ -n "${title:-}" ]]; then
+        echo -n "$title" > "$doc_dir/title.txt"
+    fi
+
+    if [[ -n "${content:-}" ]]; then
+        echo -n "$content" > "$doc_dir/content.md"
+    fi
+
+    # Build commit message
+    local commit_msg="kota: update document $document_id"
+    if [[ -n "${title:-}" ]]; then
+        commit_msg="$commit_msg title"
+    elif [[ -n "${content:-}" ]]; then
+        commit_msg="$commit_msg content"
+    fi
+
+    auto_commit "$commit_msg"
+
+    cmd_documents_read "$document_id"
+}
+
+cmd_documents_delete() {
+    local document_id=""
+    local force=false
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--document="* ]]; then
+            document_id="${arg#--document=}"
+        elif [[ "$arg" == "--document-id="* ]]; then
+            document_id="${arg#--document-id=}"
+        elif [[ "$arg" == "--document" && $((i + 1)) -lt ${#args[@]} ]]; then
+            document_id="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--document-id" && $((i + 1)) -lt ${#args[@]} ]]; then
+            document_id="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--force" ]]; then
+            force=true
+        elif [[ "$arg" != --* && -z "$document_id" ]]; then
+            document_id="$arg"
+        fi
+    done
+
+    if [[ -z "$document_id" ]]; then
+        echo "Error: Document ID required. Use --document or pass as positional argument." >&2
+        exit 1
+    fi
+
+    local ticket_id="${document_id%%/*}"
+    local uuid="${document_id#*/}"
+    local doc_dir="$KOTA_HOME/tickets/$ticket_id/documents/$uuid"
+
+    if [[ ! -d "$doc_dir" ]]; then
+        echo "Error: Document '$document_id' not found." >&2
+        exit 1
+    fi
+
+    if [[ "$force" != "true" ]]; then
+        print_document_summary "$document_id"
+        read -r -p "Are you sure you want to delete this document? [y/N] " response
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            echo "Deletion cancelled."
+            exit 0
+        fi
+    fi
+
+    rm -rf "$doc_dir"
+    auto_commit "kota: delete document $document_id"
+    echo "Deleted document $document_id."
+}
+
+cmd_documents_list() {
+    local ticket_id=""
+    local limit=""
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--ticket="* ]]; then
+            ticket_id="${arg#--ticket=}"
+        elif [[ "$arg" == "--ticket-id="* ]]; then
+            ticket_id="${arg#--ticket-id=}"
+        elif [[ "$arg" == "--ticket" && $((i + 1)) -lt ${#args[@]} ]]; then
+            ticket_id="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--ticket-id" && $((i + 1)) -lt ${#args[@]} ]]; then
+            ticket_id="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--limit="* ]]; then
+            limit="${arg#--limit=}"
+        elif [[ "$arg" == "--limit" && $((i + 1)) -lt ${#args[@]} ]]; then
+            limit="${args[$((i + 1))]}"
+        fi
+    done
+
+    check_kota_home
+
+    local documents_json=()
+
+    if [[ -n "$ticket_id" ]]; then
+        # List documents for a specific ticket
+        local docs_dir="$KOTA_HOME/tickets/$ticket_id/documents"
+        if [[ -d "$docs_dir" ]]; then
+            while IFS= read -r -d '' doc_dir; do
+                local uuid=$(basename "$doc_dir")
+                local document_id="$ticket_id/$uuid"
+                local title=""
+                if [[ -f "$doc_dir/title.txt" ]]; then
+                    title=$(cat "$doc_dir/title.txt")
+                fi
+                local created_at
+                created_at=$(get_document_created_at "$ticket_id" "$uuid")
+                local updated_at
+                updated_at=$(get_document_updated_at "$ticket_id" "$uuid")
+                documents_json+=("$(jq -n -c \
+                    --arg did "$document_id" \
+                    --arg tid "$ticket_id" \
+                    --arg t "$title" \
+                    --arg ca "$created_at" \
+                    --arg ua "$updated_at" \
+                    '{id: $did, ticket_identifier: $tid, title: $t, createdAt: $ca, updatedAt: $ua}')")
+            done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+        fi
+    else
+        # List all documents across all tickets
+        while IFS= read -r -d '' ticket_dir; do
+            local identifier=$(basename "$ticket_dir")
+            local docs_dir="$ticket_dir/documents"
+            if [[ -d "$docs_dir" ]]; then
+                while IFS= read -r -d '' doc_dir; do
+                    local uuid=$(basename "$doc_dir")
+                    local document_id="$identifier/$uuid"
+                    local title=""
+                    if [[ -f "$doc_dir/title.txt" ]]; then
+                        title=$(cat "$doc_dir/title.txt")
+                    fi
+                    local created_at
+                    created_at=$(get_document_created_at "$identifier" "$uuid")
+                    local updated_at
+                    updated_at=$(get_document_updated_at "$identifier" "$uuid")
+                    documents_json+=("$(jq -n -c \
+                        --arg did "$document_id" \
+                        --arg tid "$identifier" \
+                        --arg t "$title" \
+                        --arg ca "$created_at" \
+                        --arg ua "$updated_at" \
+                        '{id: $did, ticket_identifier: $tid, title: $t, createdAt: $ca, updatedAt: $ua}')")
+                done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+            fi
+        done < <(find "$KOTA_HOME/tickets" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+    fi
+
+    if [[ ${#documents_json[@]} -eq 0 ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    local result
+    result=$(printf '%s\n' "${documents_json[@]}" | jq -s '.')
+
+    if [[ -n "$limit" ]]; then
+        result=$(echo "$result" | jq ". | limit($limit; .)")
+    fi
+
+    echo "$result"
+}
+
+# Main entry point
+main() {
+    local command="${1:-}"
+    shift || true
+
+    case "$command" in
+        usage|--help|-h|"")
+            print_usage
+            exit 0
+            ;;
+        init)
+            cmd_init "$@"
+            ;;
+        tickets)
+            local subcommand="${1:-}"
+            shift || true
+            case "$subcommand" in
+                create)
+                    cmd_tickets_create "$@"
+                    ;;
+                read)
+                    cmd_tickets_read "$@"
+                    ;;
+                update)
+                    cmd_tickets_update "$@"
+                    ;;
+                delete)
+                    cmd_tickets_delete "$@"
+                    ;;
+                list)
+                    cmd_tickets_list "$@"
+                    ;;
+                "")
+                    echo "Error: Subcommand required. Use 'kota usage' for help." >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "Error: Unknown subcommand '$subcommand'. Use 'kota usage' for help." >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        documents)
+            local subcommand="${1:-}"
+            shift || true
+            case "$subcommand" in
+                create)
+                    cmd_documents_create "$@"
+                    ;;
+                read)
+                    cmd_documents_read "$@"
+                    ;;
+                update)
+                    cmd_documents_update "$@"
+                    ;;
+                delete)
+                    cmd_documents_delete "$@"
+                    ;;
+                list)
+                    cmd_documents_list "$@"
+                    ;;
+                "")
+                    echo "Error: Subcommand required. Use 'kota usage' for help." >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "Error: Unknown subcommand '$subcommand'. Use 'kota usage' for help." >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        "")
+            echo "Error: Command required. Use 'kota usage' for help." >&2
+            exit 1
+            ;;
+        *)
+            echo "Error: Unknown command '$command'. Use 'kota usage' for help." >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
