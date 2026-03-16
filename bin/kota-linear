@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kota-linear - Linear backend for kota, translating commands to linearis CLI calls
+
+print_usage() {
+    cat << 'EOF'
+kota (linear mode) - A CLI tool for managing tickets and documents, backed by Linear.
+
+COMMANDS:
+  kota usage, kota --help     Show this help message
+  kota init                   No-op in linear mode
+
+TICKETS:
+  kota tickets create         Create a new ticket
+  kota tickets read <id>      Read a ticket as JSON
+  kota tickets update <id>    Update an existing ticket
+  kota tickets delete <id>    Cancel a ticket (Linear doesn't support hard delete)
+  kota tickets list           List tickets
+
+DOCUMENTS:
+  kota documents create       Create a new document attached to a ticket
+  kota documents read <id>    Read a document as JSON
+  kota documents update <id>  Update an existing document
+  kota documents delete <id>  Delete a document
+  kota documents list         List documents (optionally scoped to a ticket)
+
+ENVIRONMENT VARIABLES:
+  KOTA_DEFAULT_PREFIX         Default ticket prefix / Linear team key (e.g. SNWLLY)
+  LINEAR_API_TOKEN            Linear API token (or ~/.linear_api_token)
+
+EXAMPLES:
+  kota tickets create --title "Fix login bug" --description "Users cannot log in"
+  kota tickets read SNWLLY-123
+  kota tickets update SNWLLY-123 --title "Updated title"
+  kota tickets list
+  kota tickets delete SNWLLY-123 --force
+EOF
+}
+
+# Utility: read value from stdin if "-"
+read_value() {
+    local val="$1"
+    if [[ "$val" == "-" ]]; then
+        cat
+    else
+        printf '%s' "$val"
+    fi
+}
+
+# Parse single arg value (for --key=value or --key value)
+parse_arg() {
+    local key="$1"
+    shift
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--${key}="* ]]; then
+            echo "${arg#--${key}=}"
+            return
+        elif [[ "$arg" == "--${key}" ]]; then
+            if [[ $((i + 1)) -lt ${#args[@]} ]]; then
+                echo "${args[$((i + 1))]}"
+                return
+            fi
+        fi
+    done
+}
+
+# Parse boolean flag
+has_flag() {
+    local flag="$1"
+    shift
+    for arg in "$@"; do
+        if [[ "$arg" == "$flag" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Parse first positional argument (non --flag)
+parse_positional() {
+    local skip_next=false
+    for arg in "$@"; do
+        if [[ "$skip_next" == "true" ]]; then
+            skip_next=false
+            continue
+        fi
+        if [[ "$arg" == --*=* ]]; then
+            continue
+        elif [[ "$arg" == --* ]]; then
+            skip_next=true
+            continue
+        else
+            echo "$arg"
+            return
+        fi
+    done
+}
+
+# Check if stdin was used
+stdin_was_used() {
+    [[ "$1" == "-" ]]
+}
+
+# Tickets
+
+cmd_tickets_create() {
+    local title=""
+    local description=""
+    local prefix=""
+    local stdin_used=0
+
+    title=$(parse_arg "title" "$@") || true
+    description=$(parse_arg "description" "$@") || true
+    prefix=$(parse_arg "prefix" "$@") || true
+
+    if [[ -z "$prefix" ]]; then
+        prefix="${KOTA_DEFAULT_PREFIX:-}"
+    fi
+
+    if [[ -z "$prefix" ]]; then
+        echo '{"error":"No prefix specified. Use --prefix or set KOTA_DEFAULT_PREFIX."}' >&2
+        exit 1
+    fi
+
+    if [[ -z "$title" ]]; then
+        title=$(parse_positional "$@") || true
+    fi
+
+    # Handle stdin
+    if stdin_was_used "$title"; then
+        ((stdin_used++))
+        title=$(cat)
+    fi
+    if [[ -n "$description" ]] && stdin_was_used "$description"; then
+        ((stdin_used++))
+        description=$(cat)
+    fi
+
+    if [[ $stdin_used -gt 1 ]]; then
+        echo '{"error":"Only one parameter can use stdin at a time."}' >&2
+        exit 1
+    fi
+
+    if [[ -z "$title" ]]; then
+        echo '{"error":"Title is required."}' >&2
+        exit 1
+    fi
+
+    # Build linearis command
+    local linearis_args=(issues create "$title" --team "$prefix")
+    if [[ -n "$description" ]]; then
+        linearis_args+=(-d "$description")
+    fi
+
+    linearis "${linearis_args[@]}" | jq '{
+        identifier: .identifier,
+        title: .title,
+        description: (.description // ""),
+        branchName: .branchName,
+        documents: []
+    }'
+}
+
+cmd_tickets_read() {
+    local identifier=""
+
+    identifier=$(parse_arg "ticket" "$@") || true
+    if [[ -z "$identifier" ]]; then
+        identifier=$(parse_arg "ticket-id" "$@") || true
+    fi
+    if [[ -z "$identifier" ]]; then
+        identifier=$(parse_positional "$@") || true
+    fi
+
+    if [[ -z "$identifier" ]]; then
+        echo '{"error":"Ticket identifier required."}' >&2
+        exit 1
+    fi
+
+    local issue_json
+    issue_json=$(linearis issues read "$identifier")
+
+    local docs_json
+    docs_json=$(linearis documents list --issue "$identifier")
+
+    echo "$issue_json" | jq --argjson docs "$docs_json" --arg identifier "$identifier" '{
+        identifier: .identifier,
+        title: .title,
+        description: (.description // ""),
+        branchName: .branchName,
+        documents: [$docs | .[]? | {
+            id: ($identifier + "/" + .slugId),
+            title: .title,
+            createdAt: .createdAt,
+            updatedAt: .updatedAt
+        }]
+    }'
+}
+
+cmd_tickets_update() {
+    local identifier=""
+    local title=""
+    local description=""
+
+    identifier=$(parse_arg "ticket" "$@") || true
+    if [[ -z "$identifier" ]]; then
+        identifier=$(parse_arg "ticket-id" "$@") || true
+    fi
+    if [[ -z "$identifier" ]]; then
+        identifier=$(parse_positional "$@") || true
+    fi
+    title=$(parse_arg "title" "$@") || true
+    description=$(parse_arg "description" "$@") || true
+
+    if [[ -z "$identifier" ]]; then
+        echo '{"error":"Ticket identifier required."}' >&2
+        exit 1
+    fi
+
+    # Handle stdin
+    if [[ -n "$title" ]] && stdin_was_used "$title"; then
+        title=$(cat)
+    fi
+    if [[ -n "$description" ]] && stdin_was_used "$description"; then
+        description=$(cat)
+    fi
+
+    # Build linearis command
+    local linearis_args=(issues update "$identifier")
+    if [[ -n "$title" ]]; then
+        linearis_args+=(-t "$title")
+    fi
+    if [[ -n "$description" ]]; then
+        linearis_args+=(-d "$description")
+    fi
+
+    linearis "${linearis_args[@]}" > /dev/null
+
+    # Fetch full ticket with documents (update response won't include documents)
+    cmd_tickets_read "$identifier"
+}
+
+cmd_tickets_delete() {
+    local identifier=""
+    local force=false
+
+    identifier=$(parse_arg "ticket" "$@") || true
+    if [[ -z "$identifier" ]]; then
+        identifier=$(parse_arg "ticket-id" "$@") || true
+    fi
+    if [[ -z "$identifier" ]]; then
+        identifier=$(parse_positional "$@") || true
+    fi
+    if has_flag "--force" "$@"; then
+        force=true
+    fi
+
+    if [[ -z "$identifier" ]]; then
+        echo '{"error":"Ticket identifier required."}' >&2
+        exit 1
+    fi
+
+    if [[ "$force" != "true" ]]; then
+        local issue_json
+        issue_json=$(linearis issues read "$identifier")
+        local title
+        title=$(echo "$issue_json" | jq -r '.title')
+        echo "Ticket: $identifier"
+        echo "Title: $title"
+        echo ""
+        read -r -p "Are you sure you want to cancel this ticket? [y/N] " confirm
+        if [[ "$confirm" != [yY] ]]; then
+            echo "Aborted." >&2
+            exit 1
+        fi
+    fi
+
+    linearis issues update "$identifier" --status "Canceled" > /dev/null
+}
+
+cmd_tickets_list() {
+    local prefix=""
+    local limit=""
+    local sort_by=""
+
+    prefix=$(parse_arg "prefix" "$@") || true
+    limit=$(parse_arg "limit" "$@") || true
+    sort_by=$(parse_arg "sort" "$@") || true
+
+    if [[ -z "$prefix" ]]; then
+        prefix="${KOTA_DEFAULT_PREFIX:-}"
+    fi
+
+    local result
+    result=$(linearis issues list --limit "${limit:-25}")
+
+    # Filter by prefix if set
+    if [[ -n "$prefix" ]]; then
+        result=$(echo "$result" | jq --arg prefix "$prefix" '[.[] | select(.identifier | startswith($prefix + "-"))]')
+    fi
+
+    # Reshape to kota schema
+    result=$(echo "$result" | jq '[.[] | {identifier, title, document_count: 0}]')
+
+    # Sort by title if requested
+    if [[ "$sort_by" == "title" ]]; then
+        result=$(echo "$result" | jq 'sort_by(.title)')
+    fi
+
+    echo "$result"
+}
+
+# Documents (stub for now — will be implemented in a later subtask)
+
+cmd_documents() {
+    echo '{"error":"documents commands not yet implemented in linear mode"}' >&2
+    exit 1
+}
+
+# Main entry point
+
+case "${1:-}" in
+    tickets)
+        shift
+        case "${1:-}" in
+            create) shift; cmd_tickets_create "$@" ;;
+            read)   shift; cmd_tickets_read "$@" ;;
+            update) shift; cmd_tickets_update "$@" ;;
+            delete) shift; cmd_tickets_delete "$@" ;;
+            list)   shift; cmd_tickets_list "$@" ;;
+            "")     echo "Error: Subcommand required. Use 'kota usage' for help." >&2; exit 1 ;;
+            *)      echo "Error: Unknown subcommand '$1'. Use 'kota usage' for help." >&2; exit 1 ;;
+        esac
+        ;;
+    documents) shift; cmd_documents "$@" ;;
+    init)      echo "Linear mode: no initialization needed." >&2 ;;
+    usage|--help|-h) print_usage ;;
+    "")        print_usage; exit 0 ;;
+    *)         print_usage; exit 1 ;;
+esac
