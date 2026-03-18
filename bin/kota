@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Resolve installation directory via symlink resolution
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+KOTA_BIN_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+
 case "${KOTA_BACKEND:-git}" in
-  linear) exec kota-linear "$@" ;;
-  *)      exec kota-git "$@" ;;
+  linear) exec "$KOTA_BIN_DIR/kota-linear" "$@" ;;
+  *)      exec "$KOTA_BIN_DIR/kota-git" "$@" ;;
 esac
