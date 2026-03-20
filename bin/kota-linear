@@ -30,11 +30,15 @@ ENVIRONMENT VARIABLES:
   LINEAR_API_TOKEN            Linear API token (or ~/.linear_api_token)
 
 EXAMPLES:
-  kota tickets create --title "Fix login bug" --description "Users cannot log in"
+  kota tickets create --title "Fix login bug" --description "Users cannot log in" --status Started
   kota tickets read SNWLLY-123
-  kota tickets update SNWLLY-123 --title "Updated title"
+  kota tickets update SNWLLY-123 --title "Updated title" --status Completed
   kota tickets list
+  kota tickets list --status Started
   kota tickets delete SNWLLY-123 --force
+
+VALID STATUSES:
+  Backlog, Unstarted, Started, Completed, Canceled
 EOF
 }
 
@@ -110,11 +114,13 @@ cmd_tickets_create() {
     local title=""
     local description=""
     local prefix=""
+    local status=""
     local stdin_used=0
 
     title=$(parse_arg "title" "$@") || true
     description=$(parse_arg "description" "$@") || true
     prefix=$(parse_arg "prefix" "$@") || true
+    status=$(parse_arg "status" "$@") || true
 
     if [[ -z "$prefix" ]]; then
         prefix="${KOTA_DEFAULT_PREFIX:-}"
@@ -154,11 +160,15 @@ cmd_tickets_create() {
     if [[ -n "$description" ]]; then
         linearis_args+=(-d "$description")
     fi
+    if [[ -n "$status" ]]; then
+        linearis_args+=(--status "$status")
+    fi
 
     linearis "${linearis_args[@]}" | jq '{
         identifier: .identifier,
         title: .title,
         description: (.description // ""),
+        status: (.state.name // "Unstarted"),
         branchName: .branchName,
         documents: []
     }'
@@ -190,6 +200,7 @@ cmd_tickets_read() {
         identifier: .identifier,
         title: .title,
         description: (.description // ""),
+        status: (.state.name // "Unstarted"),
         branchName: .branchName,
         documents: [$docs | .[]? | {
             id: ($identifier + "/" + .slugId),
@@ -204,6 +215,7 @@ cmd_tickets_update() {
     local identifier=""
     local title=""
     local description=""
+    local status=""
 
     identifier=$(parse_arg "ticket" "$@") || true
     if [[ -z "$identifier" ]]; then
@@ -214,6 +226,7 @@ cmd_tickets_update() {
     fi
     title=$(parse_arg "title" "$@") || true
     description=$(parse_arg "description" "$@") || true
+    status=$(parse_arg "status" "$@") || true
 
     if [[ -z "$identifier" ]]; then
         echo '{"error":"Ticket identifier required."}' >&2
@@ -235,6 +248,9 @@ cmd_tickets_update() {
     fi
     if [[ -n "$description" ]]; then
         linearis_args+=(-d "$description")
+    fi
+    if [[ -n "$status" ]]; then
+        linearis_args+=(-s "$status")
     fi
 
     linearis "${linearis_args[@]}" > /dev/null
@@ -285,10 +301,12 @@ cmd_tickets_list() {
     local prefix=""
     local limit=""
     local sort_by=""
+    local filter_status=""
 
     prefix=$(parse_arg "prefix" "$@") || true
     limit=$(parse_arg "limit" "$@") || true
     sort_by=$(parse_arg "sort" "$@") || true
+    filter_status=$(parse_arg "status" "$@") || true
 
     if [[ -z "$prefix" ]]; then
         prefix="${KOTA_DEFAULT_PREFIX:-}"
@@ -303,7 +321,12 @@ cmd_tickets_list() {
     fi
 
     # Reshape to kota schema
-    result=$(echo "$result" | jq '[.[] | {identifier, title, document_count: 0}]')
+    result=$(echo "$result" | jq '[.[] | {identifier, title, status: (.state.name // "Unstarted"), document_count: 0}]')
+
+    # Filter by status if requested
+    if [[ -n "$filter_status" ]]; then
+        result=$(echo "$result" | jq --arg s "$filter_status" '[.[] | select(.status == $s)]')
+    fi
 
     # Sort by title if requested
     if [[ "$sort_by" == "title" ]]; then
