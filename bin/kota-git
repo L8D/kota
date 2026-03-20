@@ -29,13 +29,19 @@ ENVIRONMENT VARIABLES:
   KOTA_HOME                   Path to the kota data directory (git repo). Required.
   KOTA_DEFAULT_PREFIX         Default ticket prefix (e.g. DEV) for ticket creation.
 
+TICKET STATUSES:
+  Valid status values: Backlog, Unstarted, Started, Completed, Canceled
+  Default status for new tickets: Unstarted
+
 EXAMPLES:
   kota init
   kota tickets create --title "Fix login bug" --description "Users cannot log in"
-  kota tickets create --title "New feature" --prefix FEATURE
+  kota tickets create --title "New feature" --prefix FEATURE --status Started
   kota tickets read DEV-123
   kota tickets update DEV-123 --title "Updated title"
+  kota tickets update DEV-123 --status Completed
   kota tickets list
+  kota tickets list --status Started
   kota documents create --ticket DEV-123 --title "Design notes" --content "Notes here"
   kota documents read DEV-123/cfe75b5c-86e9-46d7-8a38-04a9884b5b97
   kota documents list --ticket DEV-123
@@ -203,6 +209,21 @@ parse_arg() {
     done
 }
 
+# Valid statuses for tickets
+KOTA_VALID_STATUSES=("Backlog" "Unstarted" "Started" "Completed" "Canceled")
+
+# Validate status against valid values
+validate_status() {
+    local status="$1"
+    for s in "${KOTA_VALID_STATUSES[@]}"; do
+        if [[ "$s" == "$status" ]]; then
+            return 0
+        fi
+    done
+    echo "Error: Invalid status '$status'. Valid values: ${KOTA_VALID_STATUSES[*]}" >&2
+    exit 1
+}
+
 # Parse boolean flag
 has_flag() {
     local flag="$1"
@@ -247,6 +268,12 @@ read_ticket_json() {
         description=$(cat "$desc_file")
     fi
 
+    local status_file="$KOTA_HOME/tickets/$identifier/status.txt"
+    local status="Unstarted"
+    if [[ -f "$status_file" ]]; then
+        status=$(cat "$status_file")
+    fi
+
     # Generate branch name
     local branch_name=$(generate_branch_name "$identifier" "$title")
 
@@ -277,12 +304,14 @@ read_ticket_json() {
         --arg id "$identifier" \
         --arg t "$title" \
         --arg d "$description" \
+        --arg s "$status" \
         --arg bn "$branch_name" \
         --argjson docs "$documents" \
         '{
             identifier: $id,
             title: $t,
             description: $d,
+            status: $s,
             branchName: $bn,
             documents: $docs
         }'
@@ -409,6 +438,7 @@ cmd_init() {
 cmd_tickets_create() {
     local title=""
     local description=""
+    local status="Unstarted"
     local prefix=""
     local ticket_id=""
     local stdin_used=0
@@ -429,6 +459,10 @@ cmd_tickets_create() {
             prefix="${arg#--prefix=}"
         elif [[ "$arg" == "--prefix" && $((i + 1)) -lt ${#args[@]} ]]; then
             prefix="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--status="* ]]; then
+            status="${arg#--status=}"
+        elif [[ "$arg" == "--status" && $((i + 1)) -lt ${#args[@]} ]]; then
+            status="${args[$((i + 1))]}"
         elif [[ "$arg" == "--ticket" || "$arg" == "--ticket-id" ]]; then
             # These are for tickets read/update/delete, skip
             :
@@ -470,6 +504,8 @@ cmd_tickets_create() {
 
     check_kota_home
 
+    validate_status "$status"
+
     local id=$(get_next_id)
     local identifier="$prefix-$id"
     local ticket_dir="$KOTA_HOME/tickets/$identifier"
@@ -477,6 +513,7 @@ cmd_tickets_create() {
     mkdir -p "$ticket_dir"
     echo -n "$title" > "$ticket_dir/title.txt"
     echo -n "$description" > "$ticket_dir/description.md"
+    echo -n "$status" > "$ticket_dir/status.txt"
 
     auto_commit "kota: create ticket $identifier \"$title\""
 
@@ -517,6 +554,7 @@ cmd_tickets_update() {
     local identifier=""
     local title=""
     local description=""
+    local status=""
 
     # Parse arguments
     local args=("$@")
@@ -538,6 +576,10 @@ cmd_tickets_update() {
             description="${arg#--description=}"
         elif [[ "$arg" == "--description" && $((i + 1)) -lt ${#args[@]} ]]; then
             description="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--status="* ]]; then
+            status="${arg#--status=}"
+        elif [[ "$arg" == "--status" && $((i + 1)) -lt ${#args[@]} ]]; then
+            status="${args[$((i + 1))]}"
         elif [[ "$arg" != --* && -z "$identifier" ]]; then
             identifier="$arg"
         fi
@@ -570,12 +612,19 @@ cmd_tickets_update() {
         echo -n "$description" > "$KOTA_HOME/tickets/$identifier/description.md"
     fi
 
+    if [[ -n "${status:-}" ]]; then
+        validate_status "$status"
+        echo -n "$status" > "$KOTA_HOME/tickets/$identifier/status.txt"
+    fi
+
     # Build commit message
+    local commit_parts=()
+    [[ -n "${title:-}" ]] && commit_parts+=("title")
+    [[ -n "${description:-}" ]] && commit_parts+=("description")
+    [[ -n "${status:-}" ]] && commit_parts+=("status")
     local commit_msg="kota: update ticket $identifier"
-    if [[ -n "${title:-}" ]]; then
-        commit_msg="$commit_msg title"
-    elif [[ -n "${description:-}" ]]; then
-        commit_msg="$commit_msg description"
+    if [[ ${#commit_parts[@]} -gt 0 ]]; then
+        commit_msg="$commit_msg ${commit_parts[*]}"
     fi
 
     auto_commit "$commit_msg"
@@ -634,6 +683,7 @@ cmd_tickets_list() {
     local prefix=""
     local limit=""
     local sort_by="id"
+    local filter_status=""
 
     # Parse arguments
     local args=("$@")
@@ -651,6 +701,10 @@ cmd_tickets_list() {
             sort_by="${arg#--sort=}"
         elif [[ "$arg" == "--sort" && $((i + 1)) -lt ${#args[@]} ]]; then
             sort_by="${args[$((i + 1))]}"
+        elif [[ "$arg" == "--status="* ]]; then
+            filter_status="${arg#--status=}"
+        elif [[ "$arg" == "--status" && $((i + 1)) -lt ${#args[@]} ]]; then
+            filter_status="${args[$((i + 1))]}"
         fi
     done
 
@@ -664,6 +718,11 @@ cmd_tickets_list() {
             title=$(cat "$ticket_dir/title.txt")
         fi
 
+        local status="Unstarted"
+        if [[ -f "$ticket_dir/status.txt" ]]; then
+            status=$(cat "$ticket_dir/status.txt")
+        fi
+
         local doc_count=0
         local docs_dir="$ticket_dir/documents"
         if [[ -d "$docs_dir" ]]; then
@@ -675,11 +734,17 @@ cmd_tickets_list() {
             continue
         fi
 
+        # Apply status filter
+        if [[ -n "$filter_status" && "$status" != "$filter_status" ]]; then
+            continue
+        fi
+
         tickets_json+=("$(jq -n -c \
             --arg id "$identifier" \
             --arg t "$title" \
+            --arg s "$status" \
             --argjson dc "$doc_count" \
-            '{identifier: $id, title: $t, document_count: $dc}')")
+            '{identifier: $id, title: $t, status: $s, document_count: $dc}')")
     done < <(find "$KOTA_HOME/tickets" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
 
     # Sort and output
