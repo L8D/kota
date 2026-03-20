@@ -25,6 +25,9 @@ DOCUMENTS:
   kota documents delete <id>  Delete a document
   kota documents list         List documents (optionally scoped to a ticket)
 
+COMMENTS:
+  kota comments create <id>   Add a comment to a ticket (--body <text>)
+
 ENVIRONMENT VARIABLES:
   KOTA_HOME                   Path to the kota data directory (git repo). Required.
   KOTA_DEFAULT_PREFIX         Default ticket prefix (e.g. DEV) for ticket creation.
@@ -1088,6 +1091,57 @@ cmd_documents_list() {
     echo "$result"
 }
 
+cmd_comments_create() {
+    local ticket_id=""
+    local body=""
+
+    # Parse arguments
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--body="* ]]; then
+            body="${arg#--body=}"
+        elif [[ "$arg" == "--body" && $((i + 1)) -lt ${#args[@]} ]]; then
+            body="${args[$((i + 1))]}"
+        elif [[ "$arg" != --* && -z "$ticket_id" ]]; then
+            ticket_id="$arg"
+        fi
+    done
+
+    if [[ -z "$ticket_id" ]]; then
+        echo "Error: Ticket identifier required. Use positional argument." >&2
+        exit 1
+    fi
+
+    if [[ -z "$body" ]]; then
+        echo "Error: Comment body required. Use --body <text>." >&2
+        exit 1
+    fi
+
+    check_kota_home
+
+    if [[ ! -d "$KOTA_HOME/tickets/$ticket_id" ]]; then
+        echo "Error: Ticket '$ticket_id' not found." >&2
+        exit 1
+    fi
+
+    local comments_dir="$KOTA_HOME/tickets/$ticket_id/comments"
+    mkdir -p "$comments_dir"
+
+    local timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+    local comment_file="$comments_dir/$timestamp.md"
+
+    echo -n "$body" > "$comment_file"
+
+    auto_commit "kota: add comment to $ticket_id"
+
+    jq -n -c \
+        --arg tid "$ticket_id" \
+        --arg ts "$timestamp" \
+        --arg b "$body" \
+        '{ticket_identifier: $tid, timestamp: $ts, body: $b}'
+}
+
 # Main entry point
 main() {
     local command="${1:-}"
@@ -1148,6 +1202,23 @@ main() {
                     ;;
                 list)
                     cmd_documents_list "$@"
+                    ;;
+                "")
+                    echo "Error: Subcommand required. Use 'kota usage' for help." >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "Error: Unknown subcommand '$subcommand'. Use 'kota usage' for help." >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        comments)
+            local subcommand="${1:-}"
+            shift || true
+            case "$subcommand" in
+                create)
+                    cmd_comments_create "$@"
                     ;;
                 "")
                     echo "Error: Subcommand required. Use 'kota usage' for help." >&2

@@ -25,6 +25,9 @@ DOCUMENTS:
   kota documents delete <id>  Delete a document
   kota documents list         List documents (optionally scoped to a ticket)
 
+COMMENTS:
+  kota comments create <id>   Add a comment to a ticket (--body <text>)
+
 ENVIRONMENT VARIABLES:
   KOTA_DEFAULT_PREFIX         Default ticket prefix / Linear team key (e.g. SNWLLY)
   LINEAR_API_TOKEN            Linear API token (or ~/.linear_api_token)
@@ -553,6 +556,34 @@ cmd_documents_list() {
     fi
 }
 
+# Comments
+
+cmd_comments_create() {
+    local ticket_id=""
+    local body=""
+
+    ticket_id=$(parse_arg "ticket" "$@") || true
+    if [[ -z "$ticket_id" ]]; then
+        ticket_id=$(parse_arg "ticket-id" "$@") || true
+    fi
+    if [[ -z "$ticket_id" ]]; then
+        ticket_id=$(parse_positional "$@") || true
+    fi
+    body=$(parse_arg "body" "$@") || true
+
+    if [[ -z "$ticket_id" ]]; then
+        echo '{"error":"Ticket identifier required."}' >&2
+        exit 1
+    fi
+
+    if [[ -z "$body" ]]; then
+        echo '{"error":"Comment body required. Use --body <text>."}' >&2
+        exit 1
+    fi
+
+    linearis comments create "$ticket_id" --body "$body"
+}
+
 # Main entry point
 
 case "${1:-}" in
@@ -576,6 +607,14 @@ case "${1:-}" in
             update) shift; cmd_documents_update "$@" ;;
             delete) shift; cmd_documents_delete "$@" ;;
             list)   shift; cmd_documents_list "$@" ;;
+            "")     echo "Error: Subcommand required. Use 'kota usage' for help." >&2; exit 1 ;;
+            *)      echo "Error: Unknown subcommand '$1'. Use 'kota usage' for help." >&2; exit 1 ;;
+        esac
+        ;;
+    comments)
+        shift
+        case "${1:-}" in
+            create) shift; cmd_comments_create "$@" ;;
             "")     echo "Error: Subcommand required. Use 'kota usage' for help." >&2; exit 1 ;;
             *)      echo "Error: Unknown subcommand '$1'. Use 'kota usage' for help." >&2; exit 1 ;;
         esac
