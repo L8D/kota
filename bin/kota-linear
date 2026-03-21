@@ -171,7 +171,7 @@ cmd_tickets_create() {
         identifier: .identifier,
         title: .title,
         description: (.description // ""),
-        status: (.state.name // "Unstarted"),
+        status: ({"triage":"Backlog","backlog":"Backlog","unstarted":"Unstarted","started":"Started","completed":"Completed","canceled":"Canceled"}[.state.type] // "Unstarted"),
         branchName: .branchName,
         documents: []
     }'
@@ -203,7 +203,7 @@ cmd_tickets_read() {
         identifier: .identifier,
         title: .title,
         description: (.description // ""),
-        status: (.state.name // "Unstarted"),
+        status: ({"triage":"Backlog","backlog":"Backlog","unstarted":"Unstarted","started":"Started","completed":"Completed","canceled":"Canceled"}[.state.type] // "Unstarted"),
         branchName: .branchName,
         url: .url,
         documents: [$docs | .[]? | {
@@ -326,7 +326,7 @@ cmd_tickets_list() {
     fi
 
     # Reshape to kota schema
-    result=$(echo "$result" | jq '[.[] | {identifier, title, url, status: (.state.name // "Unstarted"), document_count: 0}]')
+    result=$(echo "$result" | jq '[.[] | {identifier, title, url, status: ({"triage":"Backlog","backlog":"Backlog","unstarted":"Unstarted","started":"Started","completed":"Completed","canceled":"Canceled"}[.state.type] // "Unstarted"), document_count: 0}]')
 
     # Filter by status if requested
     if [[ -n "$filter_status" ]]; then
