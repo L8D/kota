@@ -359,6 +359,7 @@ cmd_documents_create() {
     local ticket_id=""
     local title=""
     local content=""
+    local prefix=""
     local stdin_used=0
 
     ticket_id=$(parse_arg "ticket" "$@") || true
@@ -367,6 +368,10 @@ cmd_documents_create() {
     fi
     title=$(parse_arg "title" "$@") || true
     content=$(parse_arg "content" "$@") || true
+    prefix=$(parse_arg "prefix" "$@") || true
+    if [[ -z "$prefix" ]]; then
+        prefix="${KOTA_DEFAULT_PREFIX:-}"
+    fi
 
     # Handle stdin
     if [[ -n "$title" ]] && stdin_was_used "$title"; then
@@ -394,6 +399,9 @@ cmd_documents_create() {
     fi
 
     local args=(linearis documents create --title "$title" --attach-to "$ticket_id")
+    if [[ -n "$prefix" ]]; then
+        args+=(--team "$prefix")
+    fi
     if [[ -n "$content" ]]; then
         args+=(--content "$content")
     fi
