@@ -205,11 +205,13 @@ cmd_tickets_read() {
         description: (.description // ""),
         status: (.state.name // "Unstarted"),
         branchName: .branchName,
+        url: .url,
         documents: [$docs | .[]? | {
             id: ($identifier + "/" + .slugId),
             title: .title,
             createdAt: .createdAt,
-            updatedAt: .updatedAt
+            updatedAt: .updatedAt,
+            url: .url
         }]
     }'
 }
@@ -324,7 +326,7 @@ cmd_tickets_list() {
     fi
 
     # Reshape to kota schema
-    result=$(echo "$result" | jq '[.[] | {identifier, title, status: (.state.name // "Unstarted"), document_count: 0}]')
+    result=$(echo "$result" | jq '[.[] | {identifier, title, url, status: (.state.name // "Unstarted"), document_count: 0}]')
 
     # Filter by status if requested
     if [[ -n "$filter_status" ]]; then
@@ -422,7 +424,8 @@ cmd_documents_read() {
         title: .title,
         content: (.content // ""),
         createdAt: .createdAt,
-        updatedAt: .updatedAt
+        updatedAt: .updatedAt,
+        url: .url
     }'
 }
 
@@ -543,7 +546,8 @@ cmd_documents_list() {
             ticket_identifier: $tid,
             title: .title,
             createdAt: .createdAt,
-            updatedAt: .updatedAt
+            updatedAt: .updatedAt,
+            url: .url
         }]'
     else
         linearis documents list --limit "${limit:-50}" | jq '[.[] | {
@@ -551,7 +555,8 @@ cmd_documents_list() {
             ticket_identifier: "",
             title: .title,
             createdAt: .createdAt,
-            updatedAt: .updatedAt
+            updatedAt: .updatedAt,
+            url: .url
         }]'
     fi
 }

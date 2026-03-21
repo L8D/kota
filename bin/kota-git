@@ -296,7 +296,7 @@ read_ticket_json() {
             doc_created_at=$(get_document_created_at "$identifier" "$doc_uuid")
             local doc_updated_at
             doc_updated_at=$(get_document_updated_at "$identifier" "$doc_uuid")
-            docs_json+=("$(jq -n -c --arg did "$doc_id" --arg dt "$doc_title" --arg ca "$doc_created_at" --arg ua "$doc_updated_at" '{id: $did, title: $dt, createdAt: $ca, updatedAt: $ua}')")
+            docs_json+=("$(jq -n -c --arg did "$doc_id" --arg dt "$doc_title" --arg ca "$doc_created_at" --arg ua "$doc_updated_at" --arg url "file://$KOTA_HOME/tickets/$identifier/documents/$doc_uuid" '{id: $did, title: $dt, createdAt: $ca, updatedAt: $ua, url: $url}')")
         done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
         if [[ ${#docs_json[@]} -gt 0 ]]; then
             documents=$(printf '%s\n' "${docs_json[@]}" | jq -s '.')
@@ -309,6 +309,7 @@ read_ticket_json() {
         --arg d "$description" \
         --arg s "$status" \
         --arg bn "$branch_name" \
+        --arg url "file://$KOTA_HOME/tickets/$identifier" \
         --argjson docs "$documents" \
         '{
             identifier: $id,
@@ -316,6 +317,7 @@ read_ticket_json() {
             description: $d,
             status: $s,
             branchName: $bn,
+            url: $url,
             documents: $docs
         }'
 }
@@ -368,13 +370,15 @@ read_document_json() {
         --arg c "$content" \
         --arg ca "$created_at" \
         --arg ua "$updated_at" \
+        --arg url "file://$doc_dir" \
         '{
             id: $did,
             ticket_identifier: $tid,
             title: $t,
             content: $c,
             createdAt: $ca,
-            updatedAt: $ua
+            updatedAt: $ua,
+            url: $url
         }'
 }
 
@@ -747,7 +751,8 @@ cmd_tickets_list() {
             --arg t "$title" \
             --arg s "$status" \
             --argjson dc "$doc_count" \
-            '{identifier: $id, title: $t, status: $s, document_count: $dc}')")
+            --arg url "file://$KOTA_HOME/tickets/$identifier" \
+            '{identifier: $id, title: $t, status: $s, document_count: $dc, url: $url}')")
     done < <(find "$KOTA_HOME/tickets" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
 
     # Sort and output
@@ -1044,7 +1049,8 @@ cmd_documents_list() {
                     --arg t "$title" \
                     --arg ca "$created_at" \
                     --arg ua "$updated_at" \
-                    '{id: $did, ticket_identifier: $tid, title: $t, createdAt: $ca, updatedAt: $ua}')")
+                    --arg url "file://$KOTA_HOME/tickets/$ticket_id/documents/$uuid" \
+                    '{id: $did, ticket_identifier: $tid, title: $t, createdAt: $ca, updatedAt: $ua, url: $url}')")
             done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
         fi
     else
@@ -1070,7 +1076,8 @@ cmd_documents_list() {
                         --arg t "$title" \
                         --arg ca "$created_at" \
                         --arg ua "$updated_at" \
-                        '{id: $did, ticket_identifier: $tid, title: $t, createdAt: $ca, updatedAt: $ua}')")
+                        --arg url "file://$KOTA_HOME/tickets/$identifier/documents/$uuid" \
+                        '{id: $did, ticket_identifier: $tid, title: $t, createdAt: $ca, updatedAt: $ua, url: $url}')")
                 done < <(find "$docs_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
             fi
         done < <(find "$KOTA_HOME/tickets" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
