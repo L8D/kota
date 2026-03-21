@@ -111,6 +111,18 @@ stdin_was_used() {
     [[ "$1" == "-" ]]
 }
 
+# Convert kota status (e.g. "Started") to linearis status type (e.g. "started")
+kota_status_to_type() {
+    case "$1" in
+        Backlog)   echo "backlog" ;;
+        Unstarted) echo "unstarted" ;;
+        Started)   echo "started" ;;
+        Completed) echo "completed" ;;
+        Canceled)  echo "canceled" ;;
+        *)         echo "unstarted" ;;
+    esac
+}
+
 # Tickets
 
 cmd_tickets_create() {
@@ -164,7 +176,7 @@ cmd_tickets_create() {
         linearis_args+=(-d "$description")
     fi
     if [[ -n "$status" ]]; then
-        linearis_args+=(--status "$status")
+        linearis_args+=(--status-type "$(kota_status_to_type "$status")")
     fi
 
     linearis "${linearis_args[@]}" | jq '{
@@ -255,7 +267,7 @@ cmd_tickets_update() {
         linearis_args+=(-d "$description")
     fi
     if [[ -n "$status" ]]; then
-        linearis_args+=(-s "$status")
+        linearis_args+=(--status-type "$(kota_status_to_type "$status")")
     fi
 
     linearis "${linearis_args[@]}" > /dev/null
@@ -299,7 +311,7 @@ cmd_tickets_delete() {
         fi
     fi
 
-    linearis issues update "$identifier" --status "Canceled" > /dev/null
+    linearis issues update "$identifier" --status-type canceled > /dev/null
 }
 
 cmd_tickets_list() {
