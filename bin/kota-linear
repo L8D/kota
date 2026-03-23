@@ -171,7 +171,7 @@ cmd_tickets_create() {
     fi
 
     # Build linearis command
-    local linearis_args=(issues create "$title" --team "$prefix")
+    local linearis_args=(issues create "$title" --team "$prefix" --self-assigned)
     if [[ -n "$description" ]]; then
         linearis_args+=(-d "$description")
     fi
