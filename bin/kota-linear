@@ -224,6 +224,10 @@ cmd_tickets_read() {
             createdAt: .createdAt,
             updatedAt: .updatedAt,
             url: .url
+        }],
+        comments: [(.comments // [])[] | {
+            timestamp: .createdAt,
+            body: .body
         }]
     }'
 }
