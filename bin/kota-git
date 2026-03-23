@@ -303,6 +303,22 @@ read_ticket_json() {
         fi
     fi
 
+    # Build comments array
+    local comments="[]"
+    local comments_dir="$KOTA_HOME/tickets/$identifier/comments"
+    if [[ -d "$comments_dir" ]]; then
+        local comments_json=()
+        while IFS= read -r -d '' comment_file; do
+            local timestamp=$(basename "$comment_file" .md)
+            local body
+            body=$(cat "$comment_file")
+            comments_json+=("$(jq -n -c --arg ts "$timestamp" --arg b "$body" '{timestamp: $ts, body: $b}')")
+        done < <(find "$comments_dir" -name "*.md" -type f -print0 2>/dev/null | sort -z)
+        if [[ ${#comments_json[@]} -gt 0 ]]; then
+            comments=$(printf '%s\n' "${comments_json[@]}" | jq -s '.')
+        fi
+    fi
+
     jq -n -c \
         --arg id "$identifier" \
         --arg t "$title" \
@@ -311,6 +327,7 @@ read_ticket_json() {
         --arg bn "$branch_name" \
         --arg url "file://$KOTA_HOME/tickets/$identifier" \
         --argjson docs "$documents" \
+        --argjson comments "$comments" \
         '{
             identifier: $id,
             title: $t,
@@ -318,7 +335,8 @@ read_ticket_json() {
             status: $s,
             branchName: $bn,
             url: $url,
-            documents: $docs
+            documents: $docs,
+            comments: $comments
         }'
 }
 
