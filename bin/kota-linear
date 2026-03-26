@@ -334,7 +334,8 @@ cmd_tickets_list() {
     fi
 
     local result
-    result=$(linearis issues list --limit "${limit:-25}")
+    local args=(--limit "${limit:-200}" --assigned)
+    result=$(linearis issues list "${args[@]}")
 
     # Filter by prefix if set
     if [[ -n "$prefix" ]]; then
