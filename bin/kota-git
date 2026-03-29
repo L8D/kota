@@ -33,7 +33,8 @@ ENVIRONMENT VARIABLES:
   KOTA_DEFAULT_PREFIX         Default ticket prefix (e.g. DEV) for ticket creation.
 
 TICKET STATUSES:
-  Valid status values: Backlog, Unstarted, Started, Completed, Canceled
+  Category statuses: Backlog, Unstarted, Started, Completed, Canceled
+  Custom status names (e.g. "In Development") are also accepted.
   Default status for new tickets: Unstarted
 
 EXAMPLES:
@@ -215,16 +216,13 @@ parse_arg() {
 # Valid statuses for tickets
 KOTA_VALID_STATUSES=("Backlog" "Unstarted" "Started" "Completed" "Canceled")
 
-# Validate status against valid values
+# Validate status — any non-empty string is accepted
 validate_status() {
     local status="$1"
-    for s in "${KOTA_VALID_STATUSES[@]}"; do
-        if [[ "$s" == "$status" ]]; then
-            return 0
-        fi
-    done
-    echo "Error: Invalid status '$status'. Valid values: ${KOTA_VALID_STATUSES[*]}" >&2
-    exit 1
+    if [[ -z "$status" ]]; then
+        echo "Error: Status cannot be empty." >&2
+        exit 1
+    fi
 }
 
 # Parse boolean flag
