@@ -41,7 +41,8 @@ EXAMPLES:
   kota tickets delete SNWLLY-123 --force
 
 VALID STATUSES:
-  Backlog, Unstarted, Started, Completed, Canceled
+  Categories: Backlog, Unstarted, Started, Completed, Canceled
+  Custom status names (e.g. "In Development") are also accepted.
 EOF
 }
 
@@ -119,7 +120,15 @@ kota_status_to_type() {
         Started)   echo "started" ;;
         Completed) echo "completed" ;;
         Canceled)  echo "canceled" ;;
-        *)         echo "unstarted" ;;
+        *)         echo "Error: kota_status_to_type called with non-category '$1'" >&2; exit 1 ;;
+    esac
+}
+
+# Check if a status value is one of the 5 canonical categories
+is_category_status() {
+    case "$1" in
+        Backlog|Unstarted|Started|Completed|Canceled) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
@@ -176,7 +185,11 @@ cmd_tickets_create() {
         linearis_args+=(-d "$description")
     fi
     if [[ -n "$status" ]]; then
-        linearis_args+=(--status-type "$(kota_status_to_type "$status")")
+        if is_category_status "$status"; then
+            linearis_args+=(--status-type "$(kota_status_to_type "$status")")
+        else
+            linearis_args+=(--status "$status")
+        fi
     fi
 
     linearis "${linearis_args[@]}" | jq '{
@@ -271,7 +284,11 @@ cmd_tickets_update() {
         linearis_args+=(-d "$description")
     fi
     if [[ -n "$status" ]]; then
-        linearis_args+=(--status-type "$(kota_status_to_type "$status")")
+        if is_category_status "$status"; then
+            linearis_args+=(--status-type "$(kota_status_to_type "$status")")
+        else
+            linearis_args+=(--status "$status")
+        fi
     fi
 
     linearis "${linearis_args[@]}" > /dev/null
